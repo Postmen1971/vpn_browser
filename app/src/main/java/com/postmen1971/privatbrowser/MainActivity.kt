@@ -36,6 +36,13 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashRecorder()
+        val previousCrash = getSharedPreferences("diag", MODE_PRIVATE).getString("lastCrash", null)
+        if (previousCrash != null) {
+            getSharedPreferences("diag", MODE_PRIVATE).edit().remove("lastCrash").commit()
+            showCrashReport(previousCrash)
+            return
+        }
         try {
             initializeBrowser(savedInstanceState)
         } catch (error: Throwable) {
@@ -158,6 +165,12 @@ class MainActivity : Activity() {
                 return false
             }
 
+            // Ohne diese Methode beendet Android die ganze App, wenn der WebView-Prozess abstürzt
+            override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                runOnUiThread { recreate() }
+                return true
+            }
+
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?) =
                 if (request?.url?.host?.lowercase()?.let { host ->
                         blockedHosts.any { host == it || host.endsWith(".$it") }
@@ -207,6 +220,37 @@ class MainActivity : Activity() {
         if (::webView.isInitialized && webView.canGoBack()) webView.goBack() else super.onBackPressed()
     }
 
+    private fun installCrashRecorder() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            try {
+                getSharedPreferences("diag", MODE_PRIVATE).edit()
+                    .putString("lastCrash", android.util.Log.getStackTraceString(error)).commit()
+            } catch (_: Throwable) {
+            }
+            previous?.uncaughtException(thread, error)
+        }
+    }
+
+    private fun showCrashReport(details: String) {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(32), dp(16), dp(16))
+        }
+        root.addView(Button(this).apply {
+            text = "Browser trotzdem starten"
+            isAllCaps = false
+            setOnClickListener { recreate() }
+        })
+        root.addView(TextView(this).apply {
+            text = "PrivatBrowser ist beim letzten Mal abgestürzt.\nBitte sende einen Screenshot dieser Meldung.\n\n$details"
+            textSize = 12f
+            setTextColor(Color.BLACK)
+            setTextIsSelectable(true)
+        })
+        setContentView(android.widget.ScrollView(this).apply { addView(root) })
+    }
+
     private fun showStartupError(error: Throwable) {
         val details = android.util.Log.getStackTraceString(error)
         val message = TextView(this).apply {
@@ -239,11 +283,14 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        clearPrivateData()
-        if (::webView.isInitialized) {
-            webView.stopLoading()
-            webView.loadUrl("about:blank")
-            webView.destroy()
+        try {
+            clearPrivateData()
+            if (::webView.isInitialized) {
+                webView.stopLoading()
+                webView.loadUrl("about:blank")
+                webView.destroy()
+            }
+        } catch (_: Throwable) {
         }
         super.onDestroy()
     }
