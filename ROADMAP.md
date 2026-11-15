@@ -65,7 +65,24 @@ Der Browser soll einfach zu bedienen sein und eine helle, übersichtliche Oberfl
 - Anzeige, ob VPN aktiv ist, sobald die VPN-Funktion später eingebaut wurde.
 - Eine gut sichtbare Möglichkeit, alle privaten Daten zu löschen.
 
-### E. CyberGhost-VPN – ausdrücklich später
+### E. Versionsnummern und Update-Funktion
+
+Diese Funktion gehört fest zum PrivatBrowser. Updates sollen nachvollziehbar und sicher über GitHub Releases bereitgestellt werden.
+
+Geplantes Verhalten:
+- Die App zeigt ihre installierte Versionsnummer in den Einstellungen an (z. B. Version 1.0.0).
+- Jede Veröffentlichung erhält eine Versionsnummer und eine fortlaufende Android-`versionCode`.
+- GitHub Actions erstellt bei einer Veröffentlichung ein APK-Artefakt und stellt es als Asset einer GitHub Release bereit.
+- Die App prüft auf Wunsch und/oder in einem sinnvollen Abstand, ob eine neuere Version verfügbar ist.
+- Bei einem Update zeigt die App die neue Versionsnummer und die Änderungsübersicht (Changelog) an.
+- Der Nutzer kann das Update herunterladen oder später installieren.
+- Android öffnet anschließend den offiziellen Paket-Installer; die Installation muss vom Nutzer bestätigt werden.
+- Die App prüft, dass das heruntergeladene Paket zur erwarteten App gehört. Prüfsumme und Signaturprüfung werden vor dem produktiven Einsatz umgesetzt.
+- Updates müssen mit derselben App-ID und demselben Signaturschlüssel wie die installierte Version signiert sein, sonst kann Android sie nicht als normales Update installieren.
+- Der private Signaturschlüssel und Passwörter dürfen niemals im Repository liegen. Für Release-Builds werden geschützte GitHub Secrets verwendet.
+- Wenn kein Update verfügbar ist oder die Prüfung fehlschlägt, zeigt die App eine verständliche Meldung. Es wird keine erfolgreiche Aktualisierung vorgetäuscht.
+
+### F. CyberGhost-VPN – ausdrücklich später
 
 Dieser Punkt wird zunächst **nicht umgesetzt**. Wir kümmern uns zuerst um den Browser selbst.
 
@@ -107,7 +124,7 @@ Bereits im Repository vorhanden:
 - Kleine lokale Sperrliste für einige bekannte Werbe-/Tracking-Hosts.
 - Löschen von Cookies, Cache, Verlauf und Website-Speicher.
 - Android-Manifest mit Internet-Berechtigung und deaktiviertem App-Backup.
-- GitHub-Actions-Workflow zum Erstellen einer Debug-APK.
+- GitHub-Actions-Workflow zum Erstellen einer Debug-APK.\n- Versionsnummern und In-App-Update sind in der Roadmap aufgenommen, aber noch nicht implementiert.
 
 Noch offen:
 - Der erste GitHub-Actions-Build ist fehlgeschlagen. Ursache war ein Kotlin-Fehler bei der Einstellung des einzeiligen Adressfelds.
@@ -134,7 +151,7 @@ Workflow-Datei: `.github/workflows/android.yml`
 
 ## 7. Sicherheits- und Qualitätscheckliste
 
-- [ ] APK baut ohne Fehler.
+- [ ] APK baut ohne Fehler.\n- [ ] Versionsnummer und Android-`versionCode` stimmen.\n- [ ] Release-APK wird über GitHub Releases bereitgestellt.\n- [ ] Update-Prüfung erkennt eine neuere Version korrekt.\n- [ ] APK-Prüfsumme und Signatur werden geprüft.\n- [ ] Android-Installer installiert ein Update über die vorhandene Version.\n- [ ] Update funktioniert nur mit gleichbleibender App-ID und Signatur.
 - [ ] App startet zuverlässig.
 - [ ] HTTPS-Webseiten lassen sich öffnen.
 - [ ] Suche und direkte Adresseingabe funktionieren.
