@@ -57,7 +57,7 @@ class MainActivity : AppCompatActivity() {
 
         address = EditText(this).apply {
             hint = "Webadresse oder Suchbegriff"
-            singleLine = true
+            setSingleLine(true)
             textSize = 16f
             setTextColor(Color.rgb(25, 45, 65))
             setHintTextColor(Color.GRAY)
@@ -81,6 +81,7 @@ class MainActivity : AppCompatActivity() {
             controls.addView(button, LinearLayout.LayoutParams(0, 48, 1f))
         }
         addControl("Zurück") { if (webView.canGoBack()) webView.goBack() }
+        addControl("Start") { webView.loadUrl("https://www.startpage.com/") }
         addControl("Neu laden") { webView.reload() }
         addControl("Löschen") {
             clearPrivateData()
@@ -118,6 +119,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (!url.isNullOrBlank() && (url.startsWith("https://") || url.startsWith("http://"))) {
+                    address.setText(url)
+                    address.setSelection(address.text.length)
+                }
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url ?: return false
                 val scheme = url.scheme?.lowercase()
@@ -141,7 +150,7 @@ class MainActivity : AppCompatActivity() {
             val entered = address.text.toString().trim()
             if (entered.isBlank()) return
             val target = if (entered.contains(" ") || !entered.contains(".")) {
-                "https://www.google.com/search?q=" + java.net.URLEncoder.encode(entered, "UTF-8")
+                "https://www.startpage.com/sp/search?query=" + java.net.URLEncoder.encode(entered, "UTF-8")
             } else if (entered.startsWith("http://") || entered.startsWith("https://")) {
                 entered
             } else {
