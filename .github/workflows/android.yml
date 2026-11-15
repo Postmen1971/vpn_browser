@@ -3,15 +3,19 @@ name: Android APK
 on:
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+      SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,12 +28,42 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
-      - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+
+      - name: Signatur-Schlüssel aus GitHub Secrets bereitstellen
+        if: env.SIGNING_KEYSTORE_BASE64 != ''
+        run: |
+          echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/privatbrowser.jks"
+          echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/privatbrowser.jks" >> "$GITHUB_ENV"
+
+      - name: Hinweis ohne Signatur-Schlüssel
+        if: env.SIGNING_KEYSTORE_BASE64 == ''
+        run: echo "::warning::Keine Signatur-Secrets gesetzt – APK wird mit wechselndem Debug-Schlüssel signiert. In-App-Updates funktionieren erst mit festem Schlüssel."
+
+      - name: Build APK
+        run: gradle --no-daemon assembleRelease
+
+      - name: APK umbenennen und Prüfsumme erstellen
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk out/PrivatBrowser.apk
+          cd out && sha256sum PrivatBrowser.apk > PrivatBrowser.apk.sha256 && cat PrivatBrowser.apk.sha256
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: PrivatBrowser-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: PrivatBrowser-apk
+          path: out/*
           if-no-files-found: error
           retention-days: 14
+
+      - name: GitHub Release erstellen
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          grep -q "versionName = \"$VERSION\"" app/build.gradle.kts || { echo "::error::Tag $TAG passt nicht zu versionName in app/build.gradle.kts"; exit 1; }
+          awk -v v="## $VERSION" '$0 ~ "^## " {p = (index($0, v) == 1)} p' CHANGELOG.md | tail -n +2 > notes.md
+          [ -s notes.md ] || echo "Version $VERSION" > notes.md
+          gh release create "$TAG" out/PrivatBrowser.apk out/PrivatBrowser.apk.sha256 --title "PrivatBrowser $VERSION" --notes-file notes.md
