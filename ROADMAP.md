@@ -113,26 +113,21 @@ Bis zur fertigen Integration darf die App nicht behaupten, dass ein VPN aktiv is
 | 7 | CyberGhost/OpenVPN integrieren und testen | Später |
 | 8 | Gesamttest, Stabilität und Veröffentlichung | Zum Schluss |
 
-## 5. Aktueller technischer Stand
+## 5. Aktueller technischer Stand (Version 0.2.0)
 
-Bereits im Repository vorhanden:
-- Android-Projekt mit Kotlin und WebView.
-- Helles Grundlayout.
-- Startpage als Startseite.
-- Adress-/Suchfeld.
-- Zurück-, Start-, Neu-laden- und Löschen-Funktion.
-- Kleine lokale Sperrliste für einige bekannte Werbe-/Tracking-Hosts.
-- Löschen von Cookies, Cache, Verlauf und Website-Speicher.
-- Android-Manifest mit Internet-Berechtigung und deaktiviertem App-Backup.
-- GitHub-Actions-Workflow zum Erstellen einer Debug-APK.\n- Versionsnummern und In-App-Update sind in der Roadmap aufgenommen, aber noch nicht implementiert.
+Umgesetzt:
+- A: Grundbrowser mit Adress-/Suchleiste, Zurück/Vor/Start/Neu laden, Adress- und Ladeanzeige, verständliche Fehlerseiten, sichere Link-Behandlung (externe Apps nur nach Rückfrage, file:/content:/javascript:/data: blockiert), unsichere Zertifikate werden abgelehnt.
+- B: Löschen von Cookies, Cache, Verlauf, Formulardaten und Website-Speicher beim Start, beim Beenden und auf Knopfdruck; „Private Sitzung beenden und alles löschen“; vor dem Löschen werden alle Seiten gestoppt und alle Tabs geschlossen.
+- C: Eingebaute Sperrliste (~150 Hosts) plus optionale Filterliste StevenBlack/hosts mit wöchentlicher Aktualisierung, Ausnahmen pro Seite, Zähler blockierter Anfragen. Kein vollständiger Werbeblocker.
+- D: Mehrere Tabs, lokale Lesezeichen, Downloads mit Bestätigung, Einstellungen, gut sichtbarer „Löschen“-Knopf, VPN-Anzeige „nicht aktiv“.
+- E: Versionsanzeige, Update-Prüfung über GitHub Releases mit Changelog, SHA-256- und Signaturprüfung, Installation über den Android-Paket-Installer; Release-Workflow mit Signatur aus GitHub Secrets.
+- Mindestversion Android 5.1 (auch ältere Fire-Tablets), Absturzbericht beim nächsten Start.
 
 Noch offen:
-- Der erste GitHub-Actions-Build ist fehlgeschlagen. Ursache war ein Kotlin-Fehler bei der Einstellung des einzeiligen Adressfelds.
-- Dieser Fehler wurde korrigiert.
-- Zusätzlich wurde die Gradle-Version im Workflow angepasst, um sie mit dem Android-Gradle-Plugin kompatibel zu halten.
-- Die neuen GitHub-Actions-Läufe müssen erfolgreich abgeschlossen werden. Erst danach gilt der APK-Build als bestätigt.
-- Es wurde noch kein vollständiger Funktionstest auf einem Android-Gerät durchgeführt.
-- VPN ist noch nicht integriert.
+- Getrennte Profile/Sitzungs-Isolation (alle Tabs teilen sich Cookies).
+- Werbeschutz nur auf Host-Ebene (keine Element-/Kosmetikfilter).
+- Vollständiger Funktionstest auf mehreren Geräten.
+- VPN (Phase 7).
 
 ## 6. Build und Test
 
