@@ -179,8 +179,6 @@ class MainActivity : Activity() {
         }
     }
 
-    }
-
     private fun showStartupError(error: Throwable) {
         val details = android.util.Log.getStackTraceString(error)
         val message = TextView(this).apply {
