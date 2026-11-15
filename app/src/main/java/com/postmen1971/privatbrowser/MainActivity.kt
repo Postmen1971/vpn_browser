@@ -32,9 +32,17 @@ class MainActivity : Activity() {
         "connect.facebook.net"
     )
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        try {
+            initializeBrowser(savedInstanceState)
+        } catch (error: Throwable) {
+            showStartupError(error)
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun initializeBrowser(savedInstanceState: Bundle?) {
         clearPrivateData()
         window.statusBarColor = Color.rgb(245, 247, 250)
         window.navigationBarColor = Color.WHITE
@@ -169,6 +177,20 @@ class MainActivity : Activity() {
         } else {
             webView.restoreState(savedInstanceState)
         }
+    }
+
+    }
+
+    private fun showStartupError(error: Throwable) {
+        val details = android.util.Log.getStackTraceString(error)
+        val message = TextView(this).apply {
+            text = "PrivatBrowser – Startfehler\n\nBitte sende einen Screenshot dieser Meldung.\n\n$details"
+            textSize = 13f
+            setTextColor(Color.BLACK)
+            setPadding(24, 24, 24, 24)
+            setTextIsSelectable(true)
+        }
+        setContentView(message)
     }
 
     private fun clearPrivateData() {
