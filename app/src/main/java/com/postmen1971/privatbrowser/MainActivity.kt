@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.graphics.Color
 import android.os.Bundle
+import android.os.Build
+import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
@@ -46,20 +48,26 @@ class MainActivity : Activity() {
         clearPrivateData()
         window.statusBarColor = Color.rgb(245, 247, 250)
         window.navigationBarColor = Color.WHITE
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
-            View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        var uiFlags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        if (Build.VERSION.SDK_INT >= 26) uiFlags = uiFlags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        window.decorView.systemUiVisibility = uiFlags
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.rgb(245, 247, 250))
-            setPadding(16, 12, 16, 8)
+            setPadding(dp(12), dp(8), dp(12), dp(4))
+        }
+        // Android 15 zeichnet Apps bis unter Status- und Navigationsleiste: Abstand dafür einrechnen
+        root.setOnApplyWindowInsetsListener { v, insets ->
+            v.setPadding(dp(12), dp(8) + insets.systemWindowInsetTop, dp(12), dp(4) + insets.systemWindowInsetBottom)
+            insets
         }
 
         val heading = TextView(this).apply {
             text = "🛡  PrivatBrowser"
             textSize = 22f
             setTextColor(Color.rgb(25, 45, 65))
-            setPadding(4, 8, 4, 12)
+            setPadding(dp(4), dp(4), dp(4), dp(8))
         }
         root.addView(heading)
 
@@ -69,15 +77,23 @@ class MainActivity : Activity() {
             textSize = 16f
             setTextColor(Color.rgb(25, 45, 65))
             setHintTextColor(Color.GRAY)
-            setPadding(16, 10, 16, 10)
+            setPadding(dp(12), 0, dp(12), 0)
             setBackgroundColor(Color.WHITE)
             imeOptions = EditorInfo.IME_ACTION_GO
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
         }
-        root.addView(address, LinearLayout.LayoutParams(-1, 52))
+        val addressRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        addressRow.addView(address, LinearLayout.LayoutParams(0, dp(48), 1f))
+        val goButton = Button(this).apply {
+            text = "Los"
+            isAllCaps = false
+        }
+        addressRow.addView(goButton, LinearLayout.LayoutParams(-2, dp(48)))
+        root.addView(addressRow)
 
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 8, 0, 8)
+            setPadding(0, dp(4), 0, dp(4))
         }
         fun addControl(label: String, action: () -> Unit) {
             val button = Button(this).apply {
@@ -86,7 +102,7 @@ class MainActivity : Activity() {
                 textSize = 12f
                 setOnClickListener { action() }
             }
-            controls.addView(button, LinearLayout.LayoutParams(0, 48, 1f))
+            controls.addView(button, LinearLayout.LayoutParams(0, dp(48), 1f))
         }
         addControl("Zurück") { if (webView.canGoBack()) webView.goBack() }
         addControl("Start") { webView.loadUrl("https://www.startpage.com/") }
@@ -101,14 +117,14 @@ class MainActivity : Activity() {
             text = "VPN: Noch nicht verbunden – VPN-Anbieter/Konfiguration erforderlich"
             textSize = 12f
             setTextColor(Color.rgb(90, 105, 120))
-            setPadding(4, 4, 4, 8)
+            setPadding(dp(4), dp(2), dp(4), dp(4))
         }
         root.addView(vpnInfo)
 
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             visibility = View.GONE
         }
-        root.addView(progress, LinearLayout.LayoutParams(-1, 4))
+        root.addView(progress, LinearLayout.LayoutParams(-1, dp(3)))
 
         webView = WebView(this)
         webView.setBackgroundColor(Color.WHITE)
@@ -166,17 +182,29 @@ class MainActivity : Activity() {
             }
             webView.loadUrl(target)
         }
-        address.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_GO) {
-                openAddress()
+        // Manche Tastaturen (z. B. Fire-Tablets, Hardware-Tastatur) senden statt "GO" nur Enter
+        address.setOnEditorActionListener { _, actionId, event ->
+            val enter = event != null && event.keyCode == KeyEvent.KEYCODE_ENTER
+            if (actionId == EditorInfo.IME_ACTION_GO || actionId == EditorInfo.IME_ACTION_DONE ||
+                actionId == EditorInfo.IME_ACTION_SEARCH || actionId == EditorInfo.IME_ACTION_NEXT || enter
+            ) {
+                if (event == null || event.action == KeyEvent.ACTION_DOWN) openAddress()
                 true
             } else false
         }
+        goButton.setOnClickListener { openAddress() }
         if (savedInstanceState == null) {
             webView.loadUrl("https://www.startpage.com/")
         } else {
             webView.restoreState(savedInstanceState)
         }
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (::webView.isInitialized && webView.canGoBack()) webView.goBack() else super.onBackPressed()
     }
 
     private fun showStartupError(error: Throwable) {
