@@ -28,7 +28,7 @@ class Updater(private val context: Context) {
         const val REPO = "Postmen1971/vpn_browser"
         const val API_LATEST = "https://api.github.com/repos/$REPO/releases/latest"
         const val RELEASES_PAGE = "https://github.com/$REPO/releases"
-        private const val DAY_MS = 24L * 60 * 60 * 1000
+        private const val CHECK_INTERVAL_MS = 30L * 60 * 1000 // bei jedem Start, höchstens alle 30 Minuten
     }
 
     data class Release(
@@ -48,7 +48,7 @@ class Updater(private val context: Context) {
         set(value) = prefs.edit().putBoolean("autoCheck", value).apply()
 
     fun needsAutoCheck(): Boolean =
-        autoCheck && System.currentTimeMillis() - prefs.getLong("lastCheck", 0L) > DAY_MS
+        autoCheck && System.currentTimeMillis() - prefs.getLong("lastCheck", 0L) > CHECK_INTERVAL_MS
 
     private fun packageInfo(): PackageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
 

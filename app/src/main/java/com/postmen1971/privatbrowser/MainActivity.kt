@@ -17,6 +17,17 @@ import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.os.Message
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentValues
+import android.media.MediaScannerConnection
+import android.print.PrintManager
+import android.provider.MediaStore
+import android.util.Base64
+import android.webkit.JavascriptInterface
 import android.text.InputType
 import android.text.TextUtils
 import android.view.Gravity
@@ -60,6 +71,9 @@ class MainActivity : Activity() {
 
     companion object {
         const val START_PAGE = "https://www.startpage.com/"
+        const val HOME = "privat://home"
+        private const val DESKTOP_UA =
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         const val SEARCH_URL = "https://www.startpage.com/sp/search?query="
         private const val REQ_STORAGE = 11
         private const val REQ_FILE = 12
@@ -78,7 +92,11 @@ class MainActivity : Activity() {
         var title: String = "Neuer Tab"
         var errorUrl: String? = null
         var currentUrl: String? = null
+        var isHome = false
+        var desktop = false
     }
+
+    data class HistoryEntry(val title: String, val url: String)
 
     private lateinit var root: LinearLayout
     private lateinit var address: EditText
@@ -88,6 +106,10 @@ class MainActivity : Activity() {
     private lateinit var tabButton: Button
     private lateinit var backButton: Button
     private lateinit var forwardButton: Button
+    private lateinit var favButton: Button
+    private lateinit var findBar: LinearLayout
+    private lateinit var findInput: EditText
+    private lateinit var findCount: TextView
 
     private lateinit var blocker: Blocker
     private lateinit var bookmarks: Bookmarks
@@ -102,11 +124,17 @@ class MainActivity : Activity() {
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private var pendingUpdateFile: java.io.File? = null
+    private val sessionHistory = mutableListOf<HistoryEntry>()
+    private val blobRequests = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private var pendingSave: (() -> Unit)? = null
 
     private val settingsPrefs by lazy { getSharedPreferences("settings", Context.MODE_PRIVATE) }
     private var blockThirdPartyCookies: Boolean
         get() = settingsPrefs.getBoolean("block3pc", true)
         set(value) = settingsPrefs.edit().putBoolean("block3pc", value).apply()
+    private var textZoom: Int
+        get() = settingsPrefs.getInt("textZoom", 100)
+        set(value) = settingsPrefs.edit().putInt("textZoom", value).apply()
 
     // ------------------------------------------------------------------ Start
 
@@ -134,7 +162,7 @@ class MainActivity : Activity() {
         buildUi()
 
         val launchUrl = intent?.dataString?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-        createTab(launchUrl ?: START_PAGE)
+        createTab(launchUrl ?: HOME)
 
         // Filterliste laden und bei Bedarf wöchentlich aktualisieren
         Thread {
@@ -213,9 +241,10 @@ class MainActivity : Activity() {
         forwardButton = smallButton("▶") { current?.webView?.let { if (it.canGoForward()) it.goForward() } }
         add(backButton)
         add(forwardButton)
-        add(smallButton("Start") { loadInCurrent(START_PAGE) }, 1.3f)
+        add(smallButton("Start") { loadInCurrent(HOME) }, 1.3f)
         add(smallButton("Neu") { reloadCurrent() }, 1.2f)
-        add(smallButton("☆") { toggleBookmark() })
+        favButton = smallButton("☆") { toggleBookmark() }
+        add(favButton)
         tabButton = smallButton("1") { showTabs() }
         add(tabButton)
         val menuButton = smallButton("☰") {}
@@ -239,6 +268,40 @@ class MainActivity : Activity() {
         }
         root.addView(progress, LinearLayout.LayoutParams(-1, dp(3)))
 
+        // Suchleiste "Auf Seite suchen"
+        findBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
+            setBackgroundColor(Color.WHITE)
+        }
+        findInput = EditText(this).apply {
+            hint = "Auf Seite suchen"
+            setSingleLine(true)
+            textSize = 15f
+            setTextColor(TEXT)
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(e: android.text.Editable?) {
+                    current?.webView?.findAllAsync(e?.toString() ?: "")
+                }
+            })
+        }
+        findInput.setOnEditorActionListener { _, _, _ -> current?.webView?.findNext(true); true }
+        findCount = TextView(this).apply {
+            textSize = 13f
+            setTextColor(MUTED)
+            setPadding(dp(6), 0, dp(6), 0)
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        findBar.addView(findInput, LinearLayout.LayoutParams(0, dp(44), 1f))
+        findBar.addView(findCount, LinearLayout.LayoutParams(-2, dp(44)))
+        findBar.addView(smallButton("▲") { current?.webView?.findNext(false) }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        findBar.addView(smallButton("▼") { current?.webView?.findNext(true) }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        findBar.addView(smallButton("✕") { closeFind() }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        root.addView(findBar)
+
         container = FrameLayout(this)
         root.addView(container, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
@@ -261,13 +324,15 @@ class MainActivity : Activity() {
     private fun updateChrome() {
         val tab = current ?: return
         if (!address.hasFocus()) {
-            address.setText(tab.errorUrl ?: tab.currentUrl ?: "")
+            address.setText(if (tab.isHome) "" else tab.errorUrl ?: tab.currentUrl ?: "")
         }
+        val pageUrl = tab.currentUrl
+        favButton.text = if (!tab.isHome && pageUrl != null && bookmarks.contains(pageUrl)) "★" else "☆"
         backButton.isEnabled = tab.webView.canGoBack()
         forwardButton.isEnabled = tab.webView.canGoForward()
         tabButton.text = tabs.size.toString()
 
-        val url = tab.errorUrl ?: tab.currentUrl ?: ""
+        val url = if (tab.isHome) "" else tab.errorUrl ?: tab.currentUrl ?: ""
         val security = when {
             url.startsWith("https://") -> "🔒 Verschlüsselt"
             url.startsWith("http://") -> "⚠ Unverschlüsselt"
@@ -284,7 +349,7 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------------ Tabs
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun createTab(url: String?): Tab {
+    private fun createTab(url: String?, background: Boolean = false): Tab {
         val webView = WebView(this)
         val tab = Tab(webView)
         webView.setBackgroundColor(Color.WHITE)
@@ -293,8 +358,8 @@ class MainActivity : Activity() {
             domStorageEnabled = true
             databaseEnabled = false
             saveFormData = false
-            setSupportMultipleWindows(false)
-            javaScriptCanOpenWindowsAutomatically = false
+            setSupportMultipleWindows(true)
+            javaScriptCanOpenWindowsAutomatically = true // Popups nur nach Fingertipp, siehe onCreateWindow
             allowFileAccess = false
             allowContentAccess = false
             setGeolocationEnabled(false)
@@ -304,6 +369,7 @@ class MainActivity : Activity() {
             builtInZoomControls = true
             displayZoomControls = false
             setSupportZoom(true)
+            textZoom = this@MainActivity.textZoom
         }
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, !blockThirdPartyCookies)
@@ -311,18 +377,33 @@ class MainActivity : Activity() {
         webView.webChromeClient = ChromeClient(tab)
         webView.webViewClient = BrowserClient(tab)
         webView.setDownloadListener { dlUrl, userAgent, contentDisposition, mimeType, _ ->
-            confirmDownload(dlUrl, userAgent, contentDisposition, mimeType)
+            confirmDownload(dlUrl, userAgent, contentDisposition, mimeType, tab)
+        }
+        webView.addJavascriptInterface(BlobBridge(), "PrivatBrowserBlob")
+        webView.setOnLongClickListener { showContextMenu(tab) }
+        webView.setFindListener { active, total, _ ->
+            if (tab == current) findCount.text = if (total == 0) "0" else "${active + 1}/$total"
         }
 
         tabs.add(tab)
         container.addView(webView, FrameLayout.LayoutParams(-1, -1))
-        switchTo(tabs.size - 1)
-        if (url != null) webView.loadUrl(url)
+        if (background) {
+            webView.visibility = View.GONE
+            updateChrome()
+        } else {
+            switchTo(tabs.size - 1)
+        }
+        when (url) {
+            null -> {}
+            HOME -> showHome(tab)
+            else -> webView.loadUrl(url)
+        }
         return tab
     }
 
     private fun switchTo(index: Int) {
         if (index !in tabs.indices) return
+        if (::findBar.isInitialized && findBar.visibility == View.VISIBLE) closeFind()
         currentIndex = index
         tabs.forEachIndexed { i, t -> t.webView.visibility = if (i == index) View.VISIBLE else View.GONE }
         progress.visibility = View.INVISIBLE
@@ -335,7 +416,7 @@ class MainActivity : Activity() {
         val tab = tabs.removeAt(index)
         destroyWebView(tab.webView)
         if (tabs.isEmpty()) {
-            createTab(START_PAGE)
+            createTab(HOME)
             return
         }
         val next = when {
@@ -365,7 +446,7 @@ class MainActivity : Activity() {
         val dialog = AlertDialog.Builder(this)
             .setTitle("Tabs (${tabs.size})")
             .setView(list)
-            .setPositiveButton("Neuer Tab") { _, _ -> createTab(START_PAGE) }
+            .setPositiveButton("Neuer Tab") { _, _ -> createTab(HOME) }
             .setNegativeButton("Aktuellen schließen") { _, _ -> closeTab(currentIndex) }
             .setNeutralButton("Abbrechen", null)
             .create()
@@ -400,7 +481,7 @@ class MainActivity : Activity() {
     private fun loadInCurrent(url: String) {
         val tab = current ?: createTab(null)
         tab.errorUrl = null
-        tab.webView.loadUrl(url)
+        if (url == HOME) showHome(tab) else tab.webView.loadUrl(url)
     }
 
     private fun reloadCurrent() {
@@ -409,6 +490,8 @@ class MainActivity : Activity() {
         if (failed != null) {
             tab.errorUrl = null
             tab.webView.loadUrl(failed)
+        } else if (tab.isHome) {
+            showHome(tab)
         } else {
             tab.webView.reload()
         }
@@ -506,13 +589,23 @@ class MainActivity : Activity() {
                 tab.pageHost = host
                 tab.currentUrl = url
                 tab.errorUrl = null
+                tab.isHome = false
+            } else if (url == "about:blank" && tab.errorUrl == null && tab.title == "Startseite") {
+                tab.isHome = true
             }
             if (tab == current) updateChrome()
         }
 
         override fun onPageFinished(view: WebView?, url: String?) {
             super.onPageFinished(view, url)
-            if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) tab.currentUrl = url
+            if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+                tab.currentUrl = url
+                val title = view?.title?.takeIf { it.isNotBlank() } ?: url
+                if (sessionHistory.lastOrNull()?.url != url) {
+                    sessionHistory.add(HistoryEntry(title, url))
+                    if (sessionHistory.size > 300) sessionHistory.removeAt(0)
+                }
+            }
             if (tab == current) updateChrome()
         }
 
@@ -562,7 +655,7 @@ class MainActivity : Activity() {
                     val url = tab.currentUrl
                     tabs.removeAt(index)
                     try { container.removeView(tab.webView); tab.webView.destroy() } catch (_: Throwable) {}
-                    createTab(url ?: START_PAGE)
+                    createTab(url ?: HOME)
                     toast("Die Seite ist abgestürzt und wurde neu geladen.")
                 }
             }
@@ -578,7 +671,22 @@ class MainActivity : Activity() {
         }
 
         override fun onReceivedTitle(view: WebView?, title: String?) {
-            if (!title.isNullOrBlank()) tab.title = title
+            if (!title.isNullOrBlank() && !title.startsWith("data:") && title != "about:blank") tab.title = title
+        }
+
+        // Links mit target="_blank" und window.open nach Fingertipp öffnen einen neuen Tab; automatische Popups werden blockiert.
+        override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
+            if (!isUserGesture || resultMsg == null) return false
+            val newTab = createTab(null)
+            val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
+            transport.webView = newTab.webView
+            resultMsg.sendToTarget()
+            return true
+        }
+
+        override fun onCloseWindow(window: WebView?) {
+            val index = tabs.indexOfFirst { it.webView == window }
+            if (index >= 0) closeTab(index)
         }
 
         override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback?) {
@@ -667,32 +775,49 @@ class MainActivity : Activity() {
         val tab = current
         val popup = PopupMenu(this, anchor)
         val m = popup.menu
+        val onPage = tab != null && !tab.isHome && tab.errorUrl == null && tab.currentUrl != null
+        val url = if (onPage) tab?.currentUrl else null
         m.add(0, 1, 0, "Neuer Tab")
-        m.add(0, 2, 1, "Lesezeichen")
-        val url = tab?.currentUrl
-        if (url != null && tab?.errorUrl == null) {
-            m.add(0, 3, 2, if (bookmarks.contains(url)) "Lesezeichen entfernen" else "Lesezeichen hinzufügen")
-        }
-        val host = tab?.pageHost
-        if (host != null && blocker.enabled) {
-            m.add(0, 4, 3, if (blocker.isException(host)) "Werbeschutz für diese Seite einschalten" else "Werbeschutz für diese Seite ausschalten")
-        }
+        m.add(0, 2, 1, "Favoriten")
+        if (url != null) m.add(0, 3, 2, if (bookmarks.contains(url)) "Aus Favoriten entfernen" else "Zu Favoriten hinzufügen")
+        m.add(0, 10, 3, "Verlauf (diese Sitzung)")
         m.add(0, 5, 4, "Downloads")
-        m.add(0, 6, 5, "Sitzungsdaten löschen")
-        m.add(0, 7, 6, "Private Sitzung beenden und alles löschen")
-        m.add(0, 8, 7, "Einstellungen")
-        m.add(0, 9, 8, "Nach Updates suchen")
+        if (onPage) {
+            m.add(0, 11, 5, "Auf Seite suchen")
+            m.add(0, 12, 6, "Seite teilen")
+            m.add(0, 13, 7, "Adresse kopieren")
+        }
+        m.add(0, 14, 8, "Einfügen und öffnen")
+        if (onPage) {
+            m.add(0, 15, 9, if (tab?.desktop == true) "✓ Desktop-Version" else "Desktop-Version")
+            m.add(0, 16, 10, "Drucken / als PDF speichern")
+        }
+        val host = if (onPage) tab?.pageHost else null
+        if (host != null && blocker.enabled) {
+            m.add(0, 4, 11, if (blocker.isException(host)) "Werbeschutz für diese Seite einschalten" else "Werbeschutz für diese Seite ausschalten")
+        }
+        m.add(0, 6, 12, "Sitzungsdaten löschen")
+        m.add(0, 7, 13, "Private Sitzung beenden und alles löschen")
+        m.add(0, 8, 14, "Einstellungen")
+        m.add(0, 9, 15, "Nach Updates suchen")
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
-                1 -> createTab(START_PAGE)
+                1 -> createTab(HOME)
                 2 -> showBookmarks()
+                10 -> showHistory()
+                11 -> openFind()
+                12 -> url?.let { sharePage(tab?.title ?: it, it) }
+                13 -> url?.let { copyToClipboard(it, "Adresse kopiert") }
+                14 -> pasteAndGo()
+                15 -> tab?.let { toggleDesktop(it) }
+                16 -> tab?.let { printPage(it) }
                 3 -> toggleBookmark()
                 4 -> host?.let {
                     blocker.setException(it, !blocker.isException(it))
                     reloadCurrent()
                     toast(if (blocker.isException(it)) "Ausnahme für $it gespeichert" else "Werbeschutz für $it wieder aktiv")
                 }
-                5 -> openDownloads()
+                5 -> showDownloads()
                 6 -> confirmClearSession()
                 7 -> confirmEndSession()
                 8 -> showSettings()
@@ -708,25 +833,27 @@ class MainActivity : Activity() {
     private fun toggleBookmark() {
         val tab = current ?: return
         val url = tab.currentUrl
-        if (url == null || tab.errorUrl != null) {
-            toast("Keine Seite geöffnet.")
+        if (url == null || tab.errorUrl != null || tab.isHome) {
+            showBookmarks()
             return
         }
         if (bookmarks.contains(url)) {
             bookmarks.remove(url)
-            toast("Lesezeichen entfernt")
+            toast("Aus Favoriten entfernt")
         } else {
             bookmarks.add(tab.title, url)
-            toast("Lesezeichen gespeichert (nur auf diesem Gerät)")
+            toast("Zu Favoriten hinzugefügt – erscheint auf der Startseite")
         }
+        updateChrome()
+        refreshHomeTabs()
     }
 
     private fun showBookmarks() {
         val entries = bookmarks.all()
         if (entries.isEmpty()) {
             AlertDialog.Builder(this)
-                .setTitle("Lesezeichen")
-                .setMessage("Noch keine Lesezeichen. Tippe auf ☆, um die aktuelle Seite zu speichern.")
+                .setTitle("Favoriten")
+                .setMessage("Noch keine Favoriten. Öffne eine Seite und tippe auf ☆, um sie zu speichern.")
                 .setPositiveButton("OK", null)
                 .show()
             return
@@ -741,7 +868,7 @@ class MainActivity : Activity() {
             }
         }
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Lesezeichen")
+            .setTitle("Favoriten – lange drücken zum Löschen")
             .setView(list)
             .setNegativeButton("Schließen", null)
             .create()
@@ -752,11 +879,13 @@ class MainActivity : Activity() {
         list.setOnItemLongClickListener { _, _, position, _ ->
             val entry = entries[position]
             AlertDialog.Builder(this)
-                .setTitle("Lesezeichen löschen?")
+                .setTitle("Favorit löschen?")
                 .setMessage(entry.title)
                 .setPositiveButton("Löschen") { _, _ ->
                     bookmarks.remove(entry.url)
                     dialog.dismiss()
+                    updateChrome()
+                    refreshHomeTabs()
                     showBookmarks()
                 }
                 .setNegativeButton("Abbrechen", null)
@@ -768,7 +897,11 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------------------ Downloads
 
-    private fun confirmDownload(url: String, userAgent: String?, contentDisposition: String?, mimeType: String?) {
+    private fun confirmDownload(url: String, userAgent: String?, contentDisposition: String?, mimeType: String?, tab: Tab? = current) {
+        if (url.startsWith("blob:") || url.startsWith("data:")) {
+            confirmInlineDownload(url, contentDisposition, mimeType, tab)
+            return
+        }
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
             toast("Dieser Download-Typ wird nicht unterstützt.")
             return
@@ -821,9 +954,12 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_STORAGE) {
-            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) pendingDownload?.invoke()
-            else toast("Ohne Speicher-Berechtigung kann nicht heruntergeladen werden.")
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                pendingDownload?.invoke()
+                pendingSave?.invoke()
+            } else toast("Ohne Speicher-Berechtigung kann nicht heruntergeladen werden.")
             pendingDownload = null
+            pendingSave = null
         }
     }
 
@@ -840,10 +976,10 @@ class MainActivity : Activity() {
     private fun confirmClearSession() {
         AlertDialog.Builder(this)
             .setTitle("Sitzungsdaten löschen?")
-            .setMessage("Alle Tabs werden geschlossen. Cookies, Cache, Verlauf, Formulardaten und Website-Speicher werden gelöscht. Du wirst auf allen Webseiten abgemeldet.")
+            .setMessage("Alle Tabs werden geschlossen. Cookies, Cache, Verlauf, Formulardaten und Website-Speicher werden gelöscht. Du wirst auf allen Webseiten abgemeldet.\n\nFavoriten und Einstellungen bleiben erhalten.")
             .setPositiveButton("Alles löschen") { _, _ ->
                 clearSession()
-                createTab(START_PAGE)
+                createTab(HOME)
                 toast("Sitzungsdaten gelöscht")
             }
             .setNegativeButton("Abbrechen", null)
@@ -883,6 +1019,7 @@ class MainActivity : Activity() {
         }
         tabs.clear()
         currentIndex = 0
+        sessionHistory.clear()
         wipeStorage()
     }
 
@@ -936,8 +1073,11 @@ class MainActivity : Activity() {
 
         header("Version")
         info("PrivatBrowser ${updater.installedVersion} (Build ${updater.installedVersionCode})")
-        switch("Täglich automatisch nach Updates suchen", updater.autoCheck) { updater.autoCheck = it }
+        switch("Beim Start automatisch nach Updates suchen", updater.autoCheck) { updater.autoCheck = it }
         button("Jetzt nach Updates suchen") { checkForUpdates(silent = false) }
+
+        header("Darstellung")
+        button("Textgröße: ${textZoom} %") { chooseTextZoom() }
 
         header("Werbe- und Trackingschutz")
         switch("Werbe-/Tracker-Hosts blockieren", blocker.enabled) {
@@ -1045,7 +1185,7 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("Update verfügbar: Version ${release.version}")
             .setMessage("Installiert: ${updater.installedVersion}\n\nÄnderungen:\n${release.notes}")
-            .setPositiveButton("Herunterladen") { _, _ -> downloadUpdate(release) }
+            .setPositiveButton("Jetzt aktualisieren") { _, _ -> downloadUpdate(release) }
             .setNegativeButton("Später", null)
             .show()
     }
@@ -1066,12 +1206,8 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     dialog.dismiss()
                     pendingUpdateFile = file
-                    AlertDialog.Builder(this)
-                        .setTitle("Update geprüft")
-                        .setMessage("Prüfsumme und Signatur sind in Ordnung. Android fragt jetzt, ob das Update installiert werden soll.")
-                        .setPositiveButton("Installieren") { _, _ -> installPendingUpdate() }
-                        .setNegativeButton("Später", null)
-                        .show()
+                    toast("Update geprüft – Android fragt jetzt nach der Installation.")
+                    installPendingUpdate()
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -1085,7 +1221,9 @@ class MainActivity : Activity() {
     private fun installPendingUpdate() {
         val file = pendingUpdateFile ?: return
         try {
-            if (!updater.install(this, file)) {
+            if (updater.install(this, file)) {
+                pendingUpdateFile = null
+            } else {
                 toast("Bitte „Apps aus dieser Quelle zulassen“ aktivieren und dann zurückkehren.")
             }
         } catch (e: Exception) {
@@ -1098,9 +1236,409 @@ class MainActivity : Activity() {
         // Nach der Erlaubnis "Unbekannte Apps installieren" die Installation fortsetzen
         val file = pendingUpdateFile
         if (file != null && Build.VERSION.SDK_INT >= 26 && packageManager.canRequestPackageInstalls() && file.exists()) {
-            pendingUpdateFile = null
-            try { updater.install(this, file) } catch (_: Exception) {}
+            try { if (updater.install(this, file)) pendingUpdateFile = null } catch (_: Exception) {}
         }
+    }
+
+    // ------------------------------------------------------------------ Startseite mit Favoriten
+
+    private fun showHome(tab: Tab) {
+        tab.isHome = true
+        tab.currentUrl = null
+        tab.errorUrl = null
+        tab.pageHost = null
+        tab.blockedCount = 0
+        tab.title = "Startseite"
+        val tiles = bookmarks.all().joinToString("") { entry ->
+            val title = TextUtils.htmlEncode(entry.title)
+            val url = TextUtils.htmlEncode(entry.url)
+            val letter = TextUtils.htmlEncode(
+                (Uri.parse(entry.url).host?.removePrefix("www.")?.firstOrNull() ?: entry.title.firstOrNull() ?: '?')
+                    .uppercaseChar().toString()
+            )
+            """<a class="tile" href="$url"><span class="icon">$letter</span><span class="t">$title</span></a>"""
+        }
+        val favorites = if (tiles.isEmpty()) {
+            """<p class="hint">Noch keine Favoriten. Öffne eine Seite und tippe oben auf ☆ – sie erscheint dann hier.</p>"""
+        } else """<div class="grid">$tiles</div>"""
+        val html = """
+            <html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+            body{font-family:sans-serif;background:#f5f7fa;color:#192d41;margin:0;padding:28px 18px}
+            h1{font-size:24px;font-weight:600;text-align:center;margin:10px 0 18px}
+            form{display:flex;max-width:640px;margin:0 auto 26px;box-shadow:0 1px 4px rgba(0,0,0,.12);border-radius:24px;background:#fff;overflow:hidden}
+            input{flex:1;border:0;padding:14px 18px;font-size:17px;outline:none;background:transparent}
+            button{border:0;background:#1e64c8;color:#fff;padding:0 20px;font-size:16px}
+            h2{font-size:15px;color:#5a6978;max-width:640px;margin:0 auto 10px}
+            .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:12px;max-width:640px;margin:0 auto}
+            .tile{display:flex;flex-direction:column;align-items:center;text-decoration:none;color:#192d41;padding:10px 4px;border-radius:12px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+            .icon{width:44px;height:44px;border-radius:22px;background:#dbe7f7;color:#1e64c8;font-size:20px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-bottom:6px}
+            .t{font-size:12px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:84px}
+            .hint{color:#5a6978;text-align:center;max-width:640px;margin:0 auto}
+            .note{color:#8a97a5;font-size:12px;text-align:center;margin-top:30px}
+            </style></head><body>
+            <h1>🛡 PrivatBrowser</h1>
+            <form action="https://www.startpage.com/sp/search" method="get">
+            <input name="query" placeholder="Suchen mit Startpage" autocomplete="off"><button type="submit">Los</button></form>
+            <h2>Favoriten</h2>$favorites
+            <p class="note">Private Sitzung · Cookies und Verlauf werden beim Beenden gelöscht</p>
+            </body></html>
+        """.trimIndent()
+        tab.webView.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
+        if (tab == current) updateChrome()
+    }
+
+    private fun refreshHomeTabs() = tabs.filter { it.isHome }.forEach { showHome(it) }
+
+    // ------------------------------------------------------------------ Langes Drücken (Links, Bilder)
+
+    private fun showContextMenu(tab: Tab): Boolean {
+        val result = tab.webView.hitTestResult
+        val extra = result.extra ?: return false
+        when (result.type) {
+            WebView.HitTestResult.SRC_ANCHOR_TYPE -> linkMenu(extra, null)
+            WebView.HitTestResult.IMAGE_TYPE -> linkMenu(null, extra)
+            WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE -> {
+                val handler = Handler(Looper.getMainLooper()) { msg ->
+                    val link = msg.data?.getString("url")
+                    linkMenu(link?.takeIf { it.isNotBlank() }, extra)
+                    true
+                }
+                tab.webView.requestFocusNodeHref(handler.obtainMessage())
+            }
+            WebView.HitTestResult.EMAIL_TYPE -> askOpenExternal(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:$extra")), "die E-Mail-App")
+            WebView.HitTestResult.PHONE_TYPE -> askOpenExternal(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$extra")), "die Telefon-App")
+            else -> return false // normaler Text: Android-Textauswahl (Markieren, Kopieren, Einfügen)
+        }
+        return true
+    }
+
+    private fun linkMenu(link: String?, image: String?) {
+        val labels = mutableListOf<String>()
+        val actions = mutableListOf<() -> Unit>()
+        fun item(label: String, action: () -> Unit) { labels.add(label); actions.add(action) }
+        if (link != null) {
+            item("In neuem Tab öffnen") { createTab(link) }
+            item("Im Hintergrund-Tab öffnen") { createTab(link, background = true); toast("Im Hintergrund geöffnet") }
+            item("Link kopieren") { copyToClipboard(link, "Link kopiert") }
+            item("Link teilen") { sharePage(link, link) }
+            item("Link herunterladen") { confirmDownload(link, current?.webView?.settings?.userAgentString, null, null) }
+            item("Zu Favoriten hinzufügen") {
+                bookmarks.add(link, link)
+                toast("Zu Favoriten hinzugefügt")
+                refreshHomeTabs()
+                updateChrome()
+            }
+        }
+        if (image != null) {
+            item("Bild in neuem Tab öffnen") { createTab(image) }
+            item("Bild herunterladen") {
+                confirmDownload(image, current?.webView?.settings?.userAgentString, null, null)
+            }
+            if (!image.startsWith("data:")) item("Bildadresse kopieren") { copyToClipboard(image, "Bildadresse kopiert") }
+        }
+        val title = link ?: if (image != null && image.startsWith("data:")) "Bild" else image
+        AlertDialog.Builder(this)
+            .setTitle(title?.take(120))
+            .setItems(labels.toTypedArray()) { _, which -> actions[which]() }
+            .show()
+    }
+
+    // ------------------------------------------------------------------ Auf Seite suchen, Teilen, Kopieren
+
+    private fun openFind() {
+        findBar.visibility = View.VISIBLE
+        findInput.setText("")
+        findCount.text = ""
+        findInput.requestFocus()
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .showSoftInput(findInput, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun closeFind() {
+        findBar.visibility = View.GONE
+        tabs.forEach { it.webView.clearMatches() }
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(findInput.windowToken, 0)
+    }
+
+    private fun sharePage(title: String, url: String) {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, title)
+            putExtra(Intent.EXTRA_TEXT, url)
+        }
+        try {
+            startActivity(Intent.createChooser(intent, "Teilen"))
+        } catch (_: Exception) {
+            toast("Keine App zum Teilen gefunden.")
+        }
+    }
+
+    private fun copyToClipboard(text: String, confirmation: String) {
+        (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+            .setPrimaryClip(ClipData.newPlainText("PrivatBrowser", text))
+        toast(confirmation)
+    }
+
+    private fun pasteAndGo() {
+        val clip = (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()?.trim()
+        if (text.isNullOrBlank()) {
+            toast("Die Zwischenablage ist leer.")
+            return
+        }
+        address.setText(text)
+        openAddress()
+    }
+
+    private fun toggleDesktop(tab: Tab) {
+        tab.desktop = !tab.desktop
+        tab.webView.settings.userAgentString = if (tab.desktop) DESKTOP_UA else null
+        tab.webView.settings.loadWithOverviewMode = true
+        tab.webView.settings.useWideViewPort = true
+        tab.webView.reload()
+        toast(if (tab.desktop) "Desktop-Version wird geladen" else "Mobile Version wird geladen")
+    }
+
+    private fun printPage(tab: Tab) {
+        try {
+            val name = tab.title.ifBlank { "PrivatBrowser" }
+            (getSystemService(Context.PRINT_SERVICE) as PrintManager)
+                .print(name, tab.webView.createPrintDocumentAdapter(name), null)
+        } catch (e: Exception) {
+            toast("Drucken ist auf diesem Gerät nicht verfügbar.")
+        }
+    }
+
+    private fun showHistory() {
+        if (sessionHistory.isEmpty()) {
+            message("Verlauf", "In dieser Sitzung wurden noch keine Seiten besucht.\n\nDer Verlauf wird nur im Arbeitsspeicher gehalten und beim Löschen oder Beenden verworfen.")
+            return
+        }
+        val entries = sessionHistory.reversed()
+        val list = ListView(this)
+        list.adapter = object : ArrayAdapter<HistoryEntry>(this, android.R.layout.simple_list_item_2, android.R.id.text1, entries) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val v = super.getView(position, convertView, parent)
+                v.findViewById<TextView>(android.R.id.text1).text = entries[position].title
+                v.findViewById<TextView>(android.R.id.text2).text = entries[position].url
+                return v
+            }
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Verlauf dieser Sitzung")
+            .setView(list)
+            .setPositiveButton("Verlauf leeren") { _, _ -> sessionHistory.clear(); toast("Verlauf geleert") }
+            .setNegativeButton("Schließen", null)
+            .create()
+        list.setOnItemClickListener { _, _, position, _ ->
+            loadInCurrent(entries[position].url)
+            dialog.dismiss()
+        }
+        dialog.show()
+    }
+
+    private fun chooseTextZoom() {
+        val values = intArrayOf(75, 90, 100, 115, 130, 150, 175, 200)
+        val labels = values.map { "$it %" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Textgröße")
+            .setSingleChoiceItems(labels, values.indexOf(textZoom).coerceAtLeast(0)) { d, which ->
+                textZoom = values[which]
+                tabs.forEach { it.webView.settings.textZoom = values[which] }
+                d.dismiss()
+                toast("Textgröße ${values[which]} %")
+            }
+            .show()
+    }
+
+    // ------------------------------------------------------------------ Download-Liste
+
+    private fun showDownloads() {
+        data class Item(val name: String, val state: String, val open: (() -> Unit)?)
+        val items = mutableListOf<Item>()
+        val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        try {
+            dm.query(DownloadManager.Query())?.use { c ->
+                val idCol = c.getColumnIndex(DownloadManager.COLUMN_ID)
+                val titleCol = c.getColumnIndex(DownloadManager.COLUMN_TITLE)
+                val statusCol = c.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                val mimeCol = c.getColumnIndex(DownloadManager.COLUMN_MEDIA_TYPE)
+                while (c.moveToNext()) {
+                    val id = c.getLong(idCol)
+                    val mime = c.getString(mimeCol)
+                    when (c.getInt(statusCol)) {
+                        DownloadManager.STATUS_SUCCESSFUL -> items.add(Item(c.getString(titleCol) ?: "Datei", "✓ fertig", open = {
+                            dm.getUriForDownloadedFile(id)?.let { openFile(it, mime) }
+                        }))
+                        DownloadManager.STATUS_FAILED -> items.add(Item(c.getString(titleCol) ?: "Datei", "✗ fehlgeschlagen", null))
+                        else -> items.add(Item(c.getString(titleCol) ?: "Datei", "… wird geladen", null))
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        savedFiles().forEach { (name, uri, mime) ->
+            items.add(Item(name, "✓ fertig", open = { openFile(Uri.parse(uri), mime) }))
+        }
+        if (items.isEmpty()) {
+            message("Downloads", "Noch keine Downloads. Heruntergeladene Dateien landen im Ordner „Download“ des Geräts.")
+            return
+        }
+        val labels = items.reversed().map { "${it.name}\n${it.state}" }
+        val ordered = items.reversed()
+        AlertDialog.Builder(this)
+            .setTitle("Downloads – antippen zum Öffnen")
+            .setItems(labels.toTypedArray()) { _, which ->
+                val open = ordered[which].open
+                if (open != null) open() else toast(ordered[which].state)
+            }
+            .setNeutralButton("Ordner öffnen") { _, _ -> openDownloads() }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun openFile(source: Uri, mime: String?) {
+        val uri = if (source.scheme == "file" && Build.VERSION.SDK_INT >= 24) {
+            try {
+                androidx.core.content.FileProvider.getUriForFile(this, "$packageName.files", java.io.File(source.path ?: ""))
+            } catch (_: Exception) {
+                toast("Datei kann nicht geöffnet werden.")
+                return
+            }
+        } else source
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime?.takeIf { it.isNotBlank() } ?: contentResolver.getType(uri) ?: "*/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(intent)
+        } catch (_: Exception) {
+            toast("Keine App zum Öffnen dieser Datei gefunden.")
+        }
+    }
+
+    private fun savedFiles(): List<Triple<String, String, String?>> {
+        val raw = settingsPrefs.getString("savedFiles", "[]") ?: "[]"
+        return try {
+            val arr = org.json.JSONArray(raw)
+            (0 until arr.length()).map {
+                val o = arr.getJSONObject(it)
+                Triple(o.optString("name"), o.optString("uri"), o.optString("mime").ifBlank { null })
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun rememberSavedFile(name: String, uri: Uri, mime: String?) {
+        val arr = org.json.JSONArray(settingsPrefs.getString("savedFiles", "[]") ?: "[]")
+        arr.put(org.json.JSONObject().put("name", name).put("uri", uri.toString()).put("mime", mime ?: ""))
+        while (arr.length() > 50) arr.remove(0)
+        settingsPrefs.edit().putString("savedFiles", arr.toString()).apply()
+    }
+
+    // ------------------------------------------------------------------ blob:/data:-Downloads (moderne Webseiten)
+
+    private fun confirmInlineDownload(url: String, contentDisposition: String?, mimeType: String?, tab: Tab?) {
+        val guessed = URLUtil.guessFileName(if (url.startsWith("data:")) "download" else url, contentDisposition, mimeType)
+        val fileName = guessed.substringAfterLast('/').ifBlank { "download" }
+        AlertDialog.Builder(this)
+            .setTitle("Datei herunterladen?")
+            .setMessage("$fileName\n\nWird im Ordner „Download“ des Geräts gespeichert.")
+            .setPositiveButton("Herunterladen") { _, _ ->
+                if (url.startsWith("data:")) {
+                    saveDataUrl(url, fileName, mimeType)
+                } else {
+                    val webView = tab?.webView ?: return@setPositiveButton
+                    val token = java.util.UUID.randomUUID().toString()
+                    blobRequests[token] = fileName
+                    val js = """
+                        (function(){try{var x=new XMLHttpRequest();x.open('GET',${org.json.JSONObject.quote(url)},true);x.responseType='blob';
+                        x.onload=function(){var r=new FileReader();r.onloadend=function(){PrivatBrowserBlob.save('$token',r.result,x.response.type||'')};r.readAsDataURL(x.response)};
+                        x.onerror=function(){PrivatBrowserBlob.fail('$token','Netzwerkfehler')};x.send();}catch(e){PrivatBrowserBlob.fail('$token',String(e))}})();
+                    """.trimIndent()
+                    webView.evaluateJavascript(js, null)
+                    toast("Download wird vorbereitet …")
+                }
+            }
+            .setNegativeButton("Abbrechen", null)
+            .show()
+    }
+
+    /** Nimmt nur Daten zu einem vorher vom Nutzer bestätigten Download an (Token). */
+    private inner class BlobBridge {
+        @JavascriptInterface
+        fun save(token: String, dataUrl: String, mime: String) {
+            val name = blobRequests.remove(token) ?: return
+            runOnUiThread { saveDataUrl(dataUrl, name, mime) }
+        }
+
+        @JavascriptInterface
+        fun fail(token: String, reason: String) {
+            if (blobRequests.remove(token) != null) runOnUiThread { toast("Download fehlgeschlagen: $reason") }
+        }
+    }
+
+    private fun saveDataUrl(dataUrl: String, fileName: String, mimeHint: String?) {
+        try {
+            val header = dataUrl.substringBefore(',')
+            val payload = dataUrl.substringAfter(',', "")
+            val mime = header.removePrefix("data:").substringBefore(';').ifBlank { mimeHint ?: "application/octet-stream" }
+            val bytes = if (header.contains(";base64")) Base64.decode(payload, Base64.DEFAULT)
+            else Uri.decode(payload).toByteArray()
+            var name = fileName
+            if (!name.contains('.')) {
+                android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.let { name = "$name.$it" }
+            }
+            saveBytes(name, mime, bytes)
+        } catch (e: Exception) {
+            toast("Speichern nicht möglich: ${e.message}")
+        }
+    }
+
+    private fun saveBytes(fileName: String, mime: String, bytes: ByteArray) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("Speicherort nicht verfügbar")
+            contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+            rememberSavedFile(fileName, uri, mime)
+            toast("Gespeichert in „Download“: $fileName")
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 23 &&
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingSave = { saveBytes(fileName, mime, bytes) }
+            requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), REQ_STORAGE)
+            return
+        }
+        @Suppress("DEPRECATION")
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        dir.mkdirs()
+        var file = java.io.File(dir, fileName)
+        var n = 1
+        while (file.exists()) {
+            file = java.io.File(dir, fileName.substringBeforeLast('.') + " ($n)" +
+                (if (fileName.contains('.')) "." + fileName.substringAfterLast('.') else ""))
+            n++
+        }
+        file.writeBytes(bytes)
+        MediaScannerConnection.scanFile(this, arrayOf(file.absolutePath), arrayOf(mime), null)
+        @Suppress("DEPRECATION")
+        try {
+            (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager)
+                .addCompletedDownload(file.name, "PrivatBrowser", true, mime, file.absolutePath, file.length(), true)
+        } catch (_: Exception) {
+            rememberSavedFile(file.name, Uri.fromFile(file), mime)
+        }
+        toast("Gespeichert in „Download“: ${file.name}")
     }
 
     // ------------------------------------------------------------------ Hilfen
@@ -1117,6 +1655,10 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         if (customView != null) {
             exitFullscreen()
+            return
+        }
+        if (::findBar.isInitialized && findBar.visibility == View.VISIBLE) {
+            closeFind()
             return
         }
         val tab = current
